@@ -1,3 +1,5 @@
+export const dynamic = "force-dynamic";
+
 import { getDashboardData } from "@/lib/dashboard";
 import DashboardShell from "@/components/DashboardShell";
 import PortfolioPositions from "@/components/PortfolioPositions";
@@ -90,8 +92,7 @@ export default async function Home() {
     positions.filter((p) => p.name).map((p) => [p.ticker, p.name as string]),
   );
 
-  const glass =
-    "rounded-2xl border border-white/[0.04] bg-white/[0.02]";
+  const glass = "rounded-2xl border border-white/[0.04] bg-white/[0.02]";
 
   const portfolioSection = (
     <div className="space-y-6">
