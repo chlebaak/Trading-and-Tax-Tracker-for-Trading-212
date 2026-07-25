@@ -25,8 +25,8 @@ export default function RootLayout({
       <body className="min-h-full bg-[#060914] text-slate-200">
         {/* Ambient glow orbs - reduced blur for performance */}
         <div className="pointer-events-none fixed inset-0 overflow-hidden">
-          <div className="absolute -left-40 -top-40 h-[400px] w-[400px] rounded-full bg-cyan-500/[0.04] blur-[80px]" />
-          <div className="absolute -bottom-40 right-0 h-[400px] w-[400px] rounded-full bg-indigo-500/[0.04] blur-[80px]" />
+          <div className="absolute -left-40 -top-40 h-100 w-100 rounded-full bg-cyan-500/4 blur-[80px]" />
+          <div className="absolute -bottom-40 right-0 h-100 w-100 rounded-full bg-indigo-500/4 blur-[80px]" />
         </div>
         {children}
       </body>
