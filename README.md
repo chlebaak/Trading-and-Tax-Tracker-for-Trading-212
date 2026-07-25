@@ -97,14 +97,26 @@ T212_BASE_URL=https://live.trading212.com   # optional, default
 T212_ACCOUNT_CURRENCY=CZK                    # optional, default
 PORTFOLIO_ROUTE_KEY=your_route_key           # optional, falls back to T212_API_SECRET
 T212_CACHE_TTL_SEC=60                        # optional, default 60
+DASHBOARD_PASSWORD=my-secret-password        # optional, enables Basic Auth on deploy
 ```
+
+### 3. Password Protection (Vercel)
+
+Set `DASHBOARD_PASSWORD` in your Vercel environment variables. Once deployed, all page routes will prompt for a password via the browser's native Basic Auth dialog.
+
+- Username: anything (or empty)
+- Password: your `DASHBOARD_PASSWORD` value
+
+The `/api/*` routes use their own key-based auth and are not affected by this password.
+
+````
 
 ### 2. Install & Run
 
 ```bash
 npm install
 npm run dev
-```
+````
 
 Open [http://localhost:3000](http://localhost:3000).
 
