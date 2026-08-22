@@ -1,19 +1,20 @@
 export const dynamic = "force-dynamic";
 
 import { getDashboardData } from "@/lib/dashboard";
+import { toCzk, CAPITAL_GAINS_TAX_RATE } from "@/lib/cz-tax";
 import DashboardShell from "@/components/DashboardShell";
+import PortfolioAllocation from "@/components/PortfolioAllocation";
 import PortfolioPositions from "@/components/PortfolioPositions";
 import PortfolioSummary from "@/components/PortfolioSummary";
+import NextMilestone from "@/components/NextMilestone";
 import TaxBreakdown from "@/components/TaxBreakdown";
 import TaxTimeline from "@/components/TaxTimeline";
+import TaxVerdict from "@/components/TaxVerdict";
+import TaxYearSelect from "@/components/TaxYearSelect";
 import ValueTestGauge from "@/components/ValueTestGauge";
+import Card, { CardHeader } from "@/components/ui/Card";
+import { RingGauge } from "@/components/ui/Gauge";
 
-function formatCzk(value: number | null | undefined) {
-  if (typeof value !== "number" || Number.isNaN(value)) return "—";
-  return new Intl.NumberFormat("cs-CZ", { maximumFractionDigits: 0 }).format(
-    value,
-  );
-}
 function formatShortCzk(value: number): string {
   const abs = Math.abs(value);
   if (abs >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M Kč`;
@@ -21,13 +22,27 @@ function formatShortCzk(value: number): string {
   return `${value} Kč`;
 }
 
-export default async function Home() {
-  const { snapshot, accountCurrency } = await getDashboardData();
+export default async function Home({
+  searchParams,
+}: {
+  searchParams: Promise<{ year?: string }>;
+}) {
+  const params = await searchParams;
+  const rawYear = Number(params.year);
+  const year =
+    Number.isInteger(rawYear) && rawYear >= 2000 && rawYear <= 2100
+      ? rawYear
+      : undefined;
+
+  const { snapshot, accountCurrency } = await getDashboardData(undefined, year);
   const {
     positions,
     valueTestCzk,
     timeTestFifo,
     realizedPL,
+    realizedCostBasis,
+    account,
+    referenceYear,
     fetchedAt,
     cached,
   } = snapshot;
@@ -43,8 +58,27 @@ export default async function Home() {
   const totalHeld = totalTaxFreeQuantity + totalTaxableQuantity;
   const timeTestCompletion =
     totalHeld > 0 ? Math.round((totalTaxFreeQuantity / totalHeld) * 100) : 0;
-  const accountValue = positions.reduce((s, p) => s + (p.currentValue ?? 0), 0);
-  const totalPL = positions.reduce((s, p) => s + (p.profitLoss ?? 0), 0);
+  // Account summary with positions-derived fallbacks
+  const positionsValue = positions.reduce(
+    (s, p) => s + (p.currentValue ?? 0),
+    0,
+  );
+  const positionsPL = positions.reduce((s, p) => s + (p.profitLoss ?? 0), 0);
+  const accountValue = account?.totalValue ?? positionsValue;
+  const totalPL = account?.unrealizedPL ?? positionsPL;
+
+  const unrealizedPercent =
+    account?.investmentsCost != null && account.investmentsCost > 0
+      ? (totalPL / account.investmentsCost) * 100
+      : accountValue - totalPL > 0
+        ? (totalPL / (accountValue - totalPL)) * 100
+        : null;
+
+  const realizedPercent =
+    realizedCostBasis != null && realizedCostBasis > 0
+      ? (realizedPL / realizedCostBasis) * 100
+      : null;
+
   const remainingLimit = Math.max(
     0,
     valueTestCzk.limit - valueTestCzk.totalSold,
@@ -54,56 +88,83 @@ export default async function Home() {
     (valueTestCzk.totalSold / valueTestCzk.limit) * 100,
   );
   const isValueNearLimit = valueTestPercent >= 80 && valueTestCzk.isUnderLimit;
-  const totalLots = Object.values(timeTestFifo).reduce(
-    (s, t) => s + t.heldLots.length,
-    0,
-  );
 
-  const kpis = [
+  const stats = [
     {
-      label: "Hodnota účtu",
-      value: formatShortCzk(accountValue),
-      accent: "slate" as const,
-    },
-    {
-      label: "Celkové P/L",
-      value: `${totalPL >= 0 ? "+" : ""}${formatShortCzk(totalPL)}`,
-      accent: (totalPL >= 0 ? "emerald" : "rose") as "emerald" | "rose",
-    },
-    {
-      label: "Realiz. P/L",
-      value: `${realizedPL >= 0 ? "+" : ""}${formatShortCzk(realizedPL)}`,
-      accent: (realizedPL >= 0 ? "emerald" : "rose") as "emerald" | "rose",
+      label: "Volná hotovost",
+      value:
+        account?.cashAvailable != null
+          ? formatShortCzk(account.cashAvailable)
+          : "—",
+      tone: "info" as const,
     },
     {
       label: "Zbývá limitu",
       value: formatShortCzk(remainingLimit),
-      accent: (isValueNearLimit ? "amber" : "blue") as "amber" | "blue",
+      tone: (isValueNearLimit ? "warning" : "info") as "warning" | "info",
     },
     {
-      label: "Osvobozeno",
+      label: "Osvobozeno (časový test)",
       value: `${totalTaxFreeQuantity} ks`,
-      accent: "emerald" as const,
+      tone: "success" as const,
     },
-    { label: "Pozic", value: `${positions.length}`, accent: "slate" as const },
+    { label: "Pozic", value: `${positions.length}` },
   ];
 
   const tickerNameMap = Object.fromEntries(
     positions.filter((p) => p.name).map((p) => [p.ticker, p.name as string]),
   );
 
-  const glass = "rounded-2xl border border-white/[0.04] bg-white/[0.02]";
+  // Estimated tax saved by letting taxable lots mature past the time test
+  const priceCzkByTicker = new Map<string, number>();
+  for (const p of positions) {
+    if (p.currentPrice == null) continue;
+    priceCzkByTicker.set(
+      p.ticker,
+      toCzk(p.currentPrice, p.currency ?? accountCurrency),
+    );
+  }
+  let estimatedSavingsCzk = 0;
+  for (const [ticker, t] of Object.entries(timeTestFifo)) {
+    const priceCzk = priceCzkByTicker.get(ticker);
+    if (priceCzk == null) continue;
+    for (const lot of t.heldLots) {
+      if (lot.taxFree || lot.avgPriceCzk == null) continue;
+      const gainCzk = (priceCzk - lot.avgPriceCzk) * lot.quantity;
+      if (gainCzk > 0)
+        estimatedSavingsCzk += gainCzk * CAPITAL_GAINS_TAX_RATE;
+    }
+  }
+  const currentYear = new Date().getFullYear();
+  const yearOptions = [currentYear, currentYear - 1, currentYear - 2];
 
   const portfolioSection = (
     <div className="space-y-6">
-      <div className={`${glass} p-6`}>
-        <h3 className="mb-5 text-sm font-semibold text-slate-200">
-          Přehled portfolia
-        </h3>
-        <PortfolioSummary
-          positions={positions}
-          accountCurrency={accountCurrency}
-        />
+      <div className="grid gap-6 lg:grid-cols-5">
+        <Card className="lg:col-span-3">
+          <CardHeader
+            title="Alokace portfolia"
+            subtitle="Podíl jednotlivých pozic na celkové hodnotě"
+          />
+          <div className="p-5">
+            <PortfolioAllocation
+              positions={positions}
+              accountCurrency={accountCurrency}
+            />
+          </div>
+        </Card>
+        <Card className="lg:col-span-2">
+          <CardHeader
+            title="Výkonnost"
+            subtitle="Nejlepší a nejhorší pozice dle P/L"
+          />
+          <div className="p-5">
+            <PortfolioSummary
+              positions={positions}
+              accountCurrency={accountCurrency}
+            />
+          </div>
+        </Card>
       </div>
       <PortfolioPositions
         positions={positions}
@@ -114,43 +175,40 @@ export default async function Home() {
 
   const taxSection = (
     <div className="space-y-6">
-      <div className={`${glass} p-5`}>
-        <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-          {[
-            [
-              "Prodáno letos",
-              `${formatCzk(valueTestCzk.totalSold)} Kč`,
-              "text-slate-100",
-            ],
-            [
-              "Zbývá limitu",
-              `${formatCzk(remainingLimit)} Kč`,
-              isValueNearLimit ? "text-amber-300" : "text-teal-400",
-            ],
-            ["Aktivních lotů", `${totalLots}`, "text-slate-100"],
-            ["Osvobozeno", `${totalTaxFreeQuantity} ks`, "text-teal-400"],
-          ].map(([l, v, c]) => (
-            <div key={l as string}>
-              <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">
-                {l}
-              </p>
-              <p className={`mt-1 text-lg font-bold tracking-tight ${c}`}>
-                {v}
-              </p>
-            </div>
-          ))}
-        </div>
+      <div className="card flex flex-wrap items-center justify-between gap-3 px-5 py-4">
+        <p className="text-xs text-slate-500">
+          Přehled počítán pro daňový rok{" "}
+          <strong className="text-slate-300">{referenceYear}</strong>
+        </p>
+        <TaxYearSelect
+          current={referenceYear}
+          defaultYear={currentYear}
+          years={yearOptions}
+        />
       </div>
 
+      <TaxVerdict
+        year={referenceYear}
+        totalSold={valueTestCzk.totalSold}
+        limit={valueTestCzk.limit}
+        isUnderLimit={valueTestCzk.isUnderLimit}
+        isNearLimit={isValueNearLimit}
+        taxableQuantity={totalTaxableQuantity}
+        estimatedSavingsCzk={estimatedSavingsCzk}
+      />
+
+      <NextMilestone
+        timeTestFifo={timeTestFifo}
+        tickerNames={tickerNameMap}
+      />
+
       <div className="grid gap-6 lg:grid-cols-2">
-        <div className={`flex flex-col items-center ${glass} p-6`}>
-          <h3 className="text-sm font-semibold text-slate-200">
-            Hodnotový Test
-          </h3>
-          <p className="mt-0.5 text-xs text-slate-500">
-            Limit 100 000 Kč / rok
-          </p>
-          <div className="mt-4">
+        <Card>
+          <CardHeader
+            title="Hodnotový Test"
+            subtitle={`Limit 100 000 Kč / rok ${referenceYear}`}
+          />
+          <div className="flex justify-center p-6">
             <ValueTestGauge
               totalSold={valueTestCzk.totalSold}
               limit={valueTestCzk.limit}
@@ -158,71 +216,60 @@ export default async function Home() {
               isNearLimit={isValueNearLimit}
             />
           </div>
-        </div>
+        </Card>
 
-        <div
-          className={`${glass} relative overflow-hidden border-cyan-500/[0.06] p-6`}
-        >
-          <div className="absolute -right-6 -top-6 h-24 w-24 rounded-full bg-cyan-500/[0.04] blur-2xl" />
-          <div className="relative">
-            <h3 className="text-sm font-semibold text-slate-200">
-              Časový Test
-            </h3>
-            <p className="mt-0.5 text-xs text-slate-500">
-              Držení nad 3 roky = osvobozeno
-            </p>
-            <div className="mt-5 flex items-center gap-6">
-              <div
-                className="relative h-28 w-28 shrink-0 rounded-full"
-                style={{
-                  background: `conic-gradient(#2dd4bf 0 ${timeTestCompletion}%, rgba(255,255,255,0.04) ${timeTestCompletion}% 100%)`,
-                }}
-              >
-                <div className="absolute inset-[6px] flex items-center justify-center rounded-full bg-[#070b16]">
-                  <span className="text-xl font-bold text-slate-100">
-                    {timeTestCompletion}%
+        <Card>
+          <CardHeader
+            title="Časový Test"
+            subtitle="Držení nad 3 roky = osvobozeno"
+          />
+          <div className="flex items-center gap-6 p-6">
+            <RingGauge percent={timeTestCompletion} color="#2dd4bf">
+              <span className="text-xl font-bold text-white tabular-nums">
+                {timeTestCompletion}%
+              </span>
+              <span className="text-[10px] text-slate-500">osvobozeno</span>
+            </RingGauge>
+            <div className="flex-1 space-y-3">
+              {[
+                {
+                  bg: "bg-teal-500/[0.06] ring-1 ring-teal-500/15",
+                  dot: "bg-teal-500",
+                  label: "Osvobozeno",
+                  val: `${totalTaxFreeQuantity} ks`,
+                  clr: "text-teal-400",
+                },
+                {
+                  bg: "bg-amber-500/[0.04] ring-1 ring-amber-500/15",
+                  dot: "bg-amber-500",
+                  label: "V testu",
+                  val: `${totalTaxableQuantity} ks`,
+                  clr: "text-amber-300",
+                },
+                {
+                  bg: "bg-white/[0.02]",
+                  dot: "bg-slate-500",
+                  label: "Celkem",
+                  val: `${totalHeld} ks`,
+                  clr: "text-slate-300",
+                },
+              ].map(({ bg, dot, label, val, clr }) => (
+                <div
+                  key={label}
+                  className={`flex items-center justify-between rounded-xl px-4 py-3 ${bg}`}
+                >
+                  <div className="flex items-center gap-2 text-sm text-slate-400">
+                    <span className={`h-3 w-3 rounded-full ${dot}`} />
+                    {label}
+                  </div>
+                  <span className={`font-bold tabular-nums ${clr}`}>
+                    {val}
                   </span>
                 </div>
-              </div>
-              <div className="flex-1 space-y-3">
-                {[
-                  [
-                    "bg-teal-500/10 text-teal-400",
-                    "bg-teal-500",
-                    "Osvobozeno",
-                    `${totalTaxFreeQuantity} ks`,
-                    "text-teal-400",
-                  ],
-                  [
-                    "bg-amber-500/5 text-amber-300",
-                    "bg-amber-500",
-                    "V testu",
-                    `${totalTaxableQuantity} ks`,
-                    "text-amber-300",
-                  ],
-                  [
-                    "bg-white/[0.02] text-slate-400",
-                    "bg-slate-500",
-                    "Celkem",
-                    `${totalHeld} ks`,
-                    "text-slate-300",
-                  ],
-                ].map(([bg, dot, label, val, clr]) => (
-                  <div
-                    key={label}
-                    className={`flex items-center justify-between rounded-xl px-4 py-3 ${bg}`}
-                  >
-                    <div className="flex items-center gap-2">
-                      <span className={`h-3 w-3 rounded-full ${dot}`} />
-                      <span className="text-sm">{label}</span>
-                    </div>
-                    <span className={`font-bold ${clr}`}>{val}</span>
-                  </div>
-                ))}
-              </div>
+              ))}
             </div>
           </div>
-        </div>
+        </Card>
       </div>
 
       <TaxBreakdown timeTestFifo={timeTestFifo} tickerNames={tickerNameMap} />
@@ -232,7 +279,23 @@ export default async function Home() {
 
   return (
     <DashboardShell
-      kpis={kpis}
+      accountValue={accountValue}
+      investmentsValue={account?.investmentsValue ?? null}
+      cashTotal={account?.cashTotal ?? null}
+      cashBreakdown={
+        account
+          ? {
+              available: account.cashAvailable,
+              inPies: account.cashInPies,
+              reserved: account.cashReserved,
+            }
+          : null
+      }
+      totalPL={totalPL}
+      unrealizedPercent={unrealizedPercent}
+      realizedPL={realizedPL}
+      realizedPercent={realizedPercent}
+      stats={stats}
       fetchedAt={fetchedAt}
       cached={cached}
       valueTestPercent={valueTestPercent}

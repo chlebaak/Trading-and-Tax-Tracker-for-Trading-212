@@ -1,4 +1,5 @@
 import type {
+  Trading212AccountSummary,
   Trading212Order,
   Trading212Page,
   Trading212Position,
@@ -122,6 +123,13 @@ export class Trading212Client {
     );
   }
 
+  /** Account-level summary: total value, investments vs cash, P/L aggregates. */
+  async getAccountSummary(): Promise<Trading212AccountSummary> {
+    return this.fetchJson<Trading212AccountSummary>(
+      "/api/v0/equity/account/summary",
+    );
+  }
+
   async debugEndpoint<T>(path: string): Promise<Trading212DebugSummary[]> {
     const summaries: Trading212DebugSummary[] = [];
     const seen = new Set<string>();
@@ -202,6 +210,10 @@ export class Trading212Client {
   }
 
   private async fetchPage<T>(path: string): Promise<Trading212Page<T>> {
+    return this.fetchJson<Trading212Page<T>>(path);
+  }
+
+  private async fetchJson<T>(path: string): Promise<T> {
     const url = path.startsWith("http")
       ? path
       : new URL(path, this.baseUrl).toString();
@@ -247,6 +259,6 @@ export class Trading212Client {
       );
     }
 
-    return (await response.json()) as Trading212Page<T>;
+    return (await response.json()) as T;
   }
 }

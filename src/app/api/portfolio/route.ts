@@ -22,6 +22,11 @@ export async function GET(request: NextRequest) {
       request.nextUrl.searchParams.get("ticker")?.trim().toUpperCase() ??
       undefined;
     const debug = request.nextUrl.searchParams.get("debug") === "1";
+    const rawYear = Number(request.nextUrl.searchParams.get("year"));
+    const year =
+      Number.isInteger(rawYear) && rawYear >= 2000 && rawYear <= 2100
+        ? rawYear
+        : undefined;
     const client = new Trading212Client({
       baseUrl: process.env.T212_BASE_URL,
       apiKey: process.env.T212_API_KEY,
@@ -50,6 +55,7 @@ export async function GET(request: NextRequest) {
     const snapshot = await buildPortfolioSnapshot({
       client,
       ticker,
+      year,
       accountCurrency: getAccountCurrency(),
     });
 
@@ -57,6 +63,7 @@ export async function GET(request: NextRequest) {
       positions: snapshot.positions,
       valueTestCzk: snapshot.valueTestCzk,
       timeTestFifo: snapshot.timeTestFifo,
+      referenceYear: snapshot.referenceYear,
     };
 
     return NextResponse.json(response, { status: 200 });

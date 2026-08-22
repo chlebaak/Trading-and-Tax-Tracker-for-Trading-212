@@ -66,6 +66,8 @@ export interface TimeTestLotBreakdown {
   quantity: number;
   ageDays: number;
   taxFree: boolean;
+  /** Average purchase price of the lot converted to CZK (when known). */
+  avgPriceCzk?: number;
 }
 
 export interface TimeTestChartPoint {
@@ -80,4 +82,35 @@ export interface TimeTestSummary {
   totalHeld: number;
   chartData: TimeTestChartPoint[];
   heldLots: TimeTestLotBreakdown[];
+}
+
+/** Raw /api/v0/equity/account/summary response (defensive shape). */
+export interface Trading212AccountSummary {
+  cash?: {
+    availableToTrade?: number;
+    inPies?: number;
+    reservedForOrders?: number;
+  } | null;
+  currency?: string | null;
+  investments?: {
+    currentValue?: number;
+    realizedProfitLoss?: number;
+    totalCost?: number;
+    unrealizedProfitLoss?: number;
+  } | null;
+  totalValue?: number;
+  [key: string]: unknown;
+}
+
+export interface AccountSummary {
+  /** Total account value: investments + cash. */
+  totalValue: number | null;
+  investmentsValue: number | null;
+  cashTotal: number | null;
+  cashAvailable: number | null;
+  cashInPies: number | null;
+  cashReserved: number | null;
+  unrealizedPL: number | null;
+  realizedPL: number | null;
+  investmentsCost: number | null;
 }

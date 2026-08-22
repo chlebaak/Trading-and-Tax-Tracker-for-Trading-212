@@ -30,6 +30,7 @@ interface ZonedDateParts {
 interface LotState {
   purchasedAt: string;
   quantity: number;
+  avgPriceCzk?: number;
 }
 
 interface SummaryState {
@@ -304,13 +305,14 @@ function summarizeLots(
       taxableQuantity += lot.quantity;
     }
 
-    return {
-      purchasedAt: lot.purchasedAt,
-      quantity: lot.quantity,
-      ageDays,
-      taxFree,
-    };
-  });
+  return {
+    purchasedAt: lot.purchasedAt,
+    quantity: lot.quantity,
+    ageDays,
+    taxFree,
+    avgPriceCzk: lot.avgPriceCzk,
+  };
+});
 
   const totalHeld = taxFreeQuantity + taxableQuantity;
 
@@ -329,8 +331,25 @@ function summarizeLots(
 export function calculateValueTest(
   orders: Trading212Order[],
   accountCurrency = "CZK",
+  referenceYear?: number,
 ): ValueTestResult {
-  const startOfYear = getStartOfCurrentYearPrague();
+  const year = referenceYear ?? getPragueNow().year;
+  const startOfYear = zonedPartsToUtcDate({
+    year,
+    month: 1,
+    day: 1,
+    hour: 0,
+    minute: 0,
+    second: 0,
+  });
+  const endOfYear = zonedPartsToUtcDate({
+    year: year + 1,
+    month: 1,
+    day: 1,
+    hour: 0,
+    minute: 0,
+    second: 0,
+  });
 
   const totalSold = orders.reduce((sum, order) => {
     if (!isTradeRelevant(order) || getSideFromOrder(order) !== "SELL") {
@@ -342,7 +361,8 @@ export function calculateValueTest(
       return sum;
     }
 
-    if (orderDate.getTime() < startOfYear.getTime()) {
+    const t = orderDate.getTime();
+    if (t < startOfYear.getTime() || t >= endOfYear.getTime()) {
       return sum;
     }
 
@@ -371,8 +391,10 @@ export function calculateValueTest(
 export function buildTimeTestFifo(
   orders: Trading212Order[],
   tickerFilter?: string,
+  accountCurrency = "CZK",
 ): Record<string, TimeTestSummary> {
   const normalizedFilter = tickerFilter ? normalizeTicker(tickerFilter) : null;
+
   const groupedLots = new Map<string, SummaryState>();
 
   const sortedOrders = [...orders]
@@ -414,11 +436,17 @@ export function buildTimeTestFifo(
     const existingState = groupedLots.get(ticker) ?? { ticker, lots: [] };
 
     if (getSideFromOrder(order) === "BUY") {
+      const instrumentCurrency =
+        getInstrumentCurrencyFromOrder(order) ?? accountCurrency;
       existingState.lots.push({
         purchasedAt:
           getCreatedAtFromOrder(order)?.toISOString() ??
           new Date().toISOString(),
         quantity: filledQuantity,
+        avgPriceCzk: convertToCzk(
+          getExecutionPrice(order),
+          instrumentCurrency,
+        ),
       });
       groupedLots.set(ticker, existingState);
       continue;
@@ -451,4 +479,12 @@ export function buildTimeTestFifo(
 
 export function getPragueStartOfYear() {
   return getStartOfCurrentYearPrague();
+}
+
+/** Income tax rate applied to capital gains above the value-test limit. */
+export const CAPITAL_GAINS_TAX_RATE = 0.15;
+
+/** Converts an amount from a known currency to CZK using the fixed FX table. */
+export function toCzk(amount: number, currency?: string): number {
+  return convertToCzk(amount, currency);
 }

@@ -1,6 +1,8 @@
-import { calculateValueTest, buildTimeTestFifo } from "./cz-tax";
+import { calculateValueTest, buildTimeTestFifo, toCzk } from "./cz-tax";
 import type {
+  AccountSummary,
   NormalizedPosition,
+  Trading212AccountSummary,
   Trading212Position,
   TimeTestSummary,
   ValueTestResult,
@@ -14,6 +16,11 @@ export interface PortfolioSnapshot {
   valueTestCzk: ValueTestResult;
   timeTestFifo: Record<string, TimeTestSummary>;
   realizedPL: number;
+  /** Cost basis of already-sold positions (denominator for realized P/L %). */
+  realizedCostBasis: number | null;
+  /** Account-level summary from T212 (null when the endpoint fails). */
+  account: AccountSummary | null;
+  referenceYear: number;
   fetchedAt: string;
   cached: boolean;
 }
@@ -101,8 +108,12 @@ function normalizePosition(
   };
 }
 
-function computeRealizedPL(orders: unknown[]): number {
+function computeRealizedStats(orders: unknown[]): {
+  realizedPL: number;
+  realizedCostBasis: number | null;
+} {
   let total = 0;
+  let costBasis = 0;
   for (const order of orders) {
     const wrapper = getObject(order);
     // Orders are wrapped as { order: {...}, fill: {...} }
@@ -114,11 +125,80 @@ function computeRealizedPL(orders: unknown[]): number {
     if (orderData.side.toUpperCase() !== "SELL") continue;
 
     const realized = normalizeNumber(walletImpact?.realisedProfitLoss);
-    if (realized !== null) {
-      total += realized;
+    if (realized === null) continue;
+    total += realized;
+
+    // Cost basis ≈ proceeds(CZK) − realized. Prefer walletImpact.netValue
+    // (actual CZK proceeds net of fees); fall back to qty × price converted
+    // via the FX table. Note: fill quantities are negative on SELLs.
+    let proceedsCzk: number | null = null;
+    const netValue = normalizeNumber(walletImpact?.netValue);
+    if (netValue != null) {
+      proceedsCzk = Math.abs(netValue);
+    } else {
+      const instrument = getObject(orderData?.instrument);
+      const currency =
+        typeof instrument?.currency === "string"
+          ? instrument.currency
+          : undefined;
+      const qty = Math.abs(
+        normalizeNumber(fill?.quantity) ??
+          normalizeNumber(orderData?.filledQuantity) ??
+          0,
+      );
+      const price =
+        normalizeNumber(fill?.price) ??
+        normalizeNumber(orderData?.executionPrice) ??
+        normalizeNumber(orderData?.averagePrice);
+
+      if (qty > 0 && price != null && price > 0) {
+        proceedsCzk = toCzk(qty * price, currency);
+      }
+    }
+
+    if (proceedsCzk != null) {
+      costBasis += Math.max(proceedsCzk - realized, 0);
     }
   }
-  return Number(total.toFixed(2));
+
+  return {
+    realizedPL: Number(total.toFixed(2)),
+    realizedCostBasis: costBasis > 0 ? Number(costBasis.toFixed(2)) : null,
+  };
+}
+
+function normalizeAccountSummary(
+  raw: Trading212AccountSummary,
+): AccountSummary {
+  const cash = getObject(raw.cash);
+  const investments = getObject(raw.investments);
+
+  const investmentsValue = normalizeNumber(investments?.currentValue);
+  const totalValue = normalizeNumber(raw.totalValue);
+  const available = normalizeNumber(cash?.availableToTrade);
+  const inPies = normalizeNumber(cash?.inPies);
+  const reserved = normalizeNumber(cash?.reservedForOrders);
+
+  let cashTotal: number | null = null;
+  if (totalValue != null && investmentsValue != null) {
+    cashTotal = Number((totalValue - investmentsValue).toFixed(2));
+  } else if (available != null || inPies != null || reserved != null) {
+    cashTotal = Number(
+      ((available ?? 0) + (inPies ?? 0) + (reserved ?? 0)).toFixed(2),
+    );
+  }
+
+  return {
+    totalValue,
+    investmentsValue,
+    cashTotal,
+    cashAvailable: available,
+    cashInPies: inPies,
+    cashReserved: reserved,
+    unrealizedPL: normalizeNumber(investments?.unrealizedProfitLoss),
+    realizedPL: normalizeNumber(investments?.realizedProfitLoss),
+    investmentsCost: normalizeNumber(investments?.totalCost),
+  };
 }
 
 // --- Cache ---
@@ -139,33 +219,55 @@ function getCacheTTL(): number {
   return 60; // default 60 seconds
 }
 
-function buildCacheKey(ticker?: string, accountCurrency?: string): string {
-  return `${accountCurrency ?? DEFAULT_ACCOUNT_CURRENCY}:${ticker ?? "__all__"}`;
+function buildCacheKey(
+  ticker?: string,
+  accountCurrency?: string,
+  year?: number,
+): string {
+  return `${accountCurrency ?? DEFAULT_ACCOUNT_CURRENCY}:${ticker ?? "__all__"}:${year ?? "current"}`;
 }
 
 async function fetchFreshSnapshot(options: {
   client: Trading212Client;
   ticker?: string;
   accountCurrency?: string;
+  year?: number;
 }): Promise<PortfolioSnapshot> {
-  const [positions, orders] = await Promise.all([
+  const [positions, orders, summaryRaw] = await Promise.all([
     options.client.getPortfolioPositions(),
     options.client.getHistoricalOrders(),
+    // Non-fatal: dashboard falls back to positions-derived values
+    options.client.getAccountSummary().catch(() => null),
   ]);
 
   const normalizedPositions = positions
     .map(normalizePosition)
     .filter((position): position is NormalizedPosition => position !== null);
   const accountCurrency = options.accountCurrency ?? DEFAULT_ACCOUNT_CURRENCY;
-  const valueTestCzk = calculateValueTest(orders, accountCurrency);
+  const valueTestCzk = calculateValueTest(
+    orders,
+    accountCurrency,
+    options.year,
+  );
   const timeTestFifo = buildTimeTestFifo(orders, options.ticker);
-  const realizedPL = computeRealizedPL(orders);
+  const realizedStats = computeRealizedStats(orders);
+  const account = summaryRaw ? normalizeAccountSummary(summaryRaw) : null;
 
   return {
     positions: normalizedPositions,
     valueTestCzk,
     timeTestFifo,
-    realizedPL,
+    realizedPL: account?.realizedPL ?? realizedStats.realizedPL,
+    realizedCostBasis: realizedStats.realizedCostBasis,
+    account,
+    referenceYear:
+      options.year ??
+      Number(
+        new Intl.DateTimeFormat("en-GB", {
+          timeZone: "Europe/Prague",
+          year: "numeric",
+        }).format(new Date()),
+      ),
     fetchedAt: new Date().toISOString(),
     cached: false,
   };
@@ -175,9 +277,14 @@ export async function buildPortfolioSnapshot(options: {
   client: Trading212Client;
   ticker?: string;
   accountCurrency?: string;
+  year?: number;
 }): Promise<PortfolioSnapshot> {
   const ttl = getCacheTTL();
-  const key = buildCacheKey(options.ticker, options.accountCurrency);
+  const key = buildCacheKey(
+    options.ticker,
+    options.accountCurrency,
+    options.year,
+  );
   const now = Date.now();
 
   const cached = snapshotCache.get(key);
